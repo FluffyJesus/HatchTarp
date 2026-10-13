@@ -11,8 +11,7 @@ Well, now you can!
 
 ## Installation
 
-- **Mod manager:** install HatchTarp from Thunderstore.
-- **Manually:** copy the `HatchTarp` folder into `Sailwind/BepInEx/plugins/`.
+Copy the `HatchTarp` folder into `Sailwind/BepInEx/plugins/`.
 
 ## How it works
 
@@ -42,7 +41,7 @@ Out of the box, the canvas works on ships whose water overflow points sit right 
 - Gloriana (mod)
 - Chronian (mod)
 
-On some ships (e.g. Caelanor, Santa Maria) the overflow points are on the sides of the hull rather than at the hatches. You can make the canvas cover them by increasing `ZoneRadius`. Keep in mind that this water may actually be coming over the side, so it's a bit of a cheat. Take the canvas off and fit it again after changing the radius.
+On some ships (e.g. Caelanor, Santa Maria) the overflow points are on the sides of the hull rather than at the hatches. You can make the canvas cover them by increasing `ZoneRadius`. Keep in mind that it's a bit of a cheat if a hatch is too far away from the point of overflow. Take the canvas off and fit it again after changing the radius.
 
 ## Configuration
 
