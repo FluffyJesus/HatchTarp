@@ -38,6 +38,7 @@ Some ships have an open companionway into the hold (by default: the large dhow a
 Out of the box, the canvas works on ships whose water overflow points sit right at the hatches:
 
 - Large dhow (vanilla)
+- Cog (with Shipyard Expanded hatches)
 - Gloriana (mod)
 - Chronian (mod)
 
