@@ -33,12 +33,18 @@ static class Balance
     public const float ShopGap = 0.05f;         // gap (m) between the counter end and the canvas bales
     public const int ShopStack = 2;             // canvas bales stacked next to a shop counter
 	public const float ShopMaxShift = 1.5f;     // how far (m) the stack may move away from the counter to find a free spot
+	public const float ShopMaxCounter = 3f;     // a "counter" longer than this (m, half length) is a floor or terrain, not a counter
+	// hand-placed canvas stacks: shop spawner path = x|y|z|yaw (relative to the oakum spawner), or "skip"
+    public const string ShopPlacements =
+        "island 9 E (dragon cliffs) scenery/shop item spawner (229)=-1.101|-0.086|2.061|128.742;" +
+        "island 1 A (gold rock) scenery/shop item (218)=-0.977|-0.878|0.58|120.995;" +
+        "island scenery Lagoon Shipyard/shop item (244)=1.42|-0.001|0.958|-116.547";
 }
 
 // ============================================================================
 //  PLUGIN: config, debug tools
 // ============================================================================
-[BepInPlugin("yourname.hatchtarp", "HatchTarp", "0.3.1")]
+[BepInPlugin("yourname.hatchtarp", "HatchTarp", "0.4.1")]
 public class Plugin : BaseUnityPlugin
 {
     internal static Plugin Instance;
@@ -84,7 +90,7 @@ public class Plugin : BaseUnityPlugin
 
         Sun.OnNewDay += Hatches.DailyWear;
         new Harmony("yourname.hatchtarp").PatchAll();
-        Log.LogInfo("HatchTarp 0.3.1 loaded");
+        Log.LogInfo("HatchTarp 0.4.1 loaded");
     }
 
     void Update()
@@ -1358,9 +1364,12 @@ static class HatchSurface
 // ============================================================================
 static class Shops
 {
-    static readonly HashSet<ShopItemSpawner> done = new HashSet<ShopItemSpawner>();
-    static readonly HashSet<GameObject> ours = new HashSet<GameObject>();
-    static readonly Dictionary<ShopItemSpawner, float> firstSeen = new Dictionary<ShopItemSpawner, float>();
+    class Group
+    {
+        public string key;
+        public ShopItemSpawner anchor;
+        public List<ShopItemSpawner> members;
+    }
 
     class Spot
     {
@@ -1371,6 +1380,11 @@ static class Shops
         public float dist;
         public float ground;
     }
+
+    static readonly HashSet<ShopItemSpawner> done = new HashSet<ShopItemSpawner>();
+    static readonly HashSet<GameObject> ours = new HashSet<GameObject>();
+    static readonly Dictionary<ShopItemSpawner, float> firstSeen = new Dictionary<ShopItemSpawner, float>();
+    static Dictionary<string, string> placements;
 
     internal static void Tick()
     {
@@ -1391,11 +1405,13 @@ static class Shops
             if (!firstSeen.ContainsKey(s)) firstSeen[s] = Time.unscaledTime;
             if (!Stocked(s) && Time.unscaledTime - firstSeen[s] < 20f) continue;
 
-            var group = oakums
+            var members = oakums
                 .Where(o => Vector3.Distance(o.transform.position, s.transform.position) < 3f)
                 .ToList();
-            foreach (var g in group) done.Add(g);
-            Create(s, group);
+            foreach (var m in members) done.Add(m);
+
+            var anchor = members.OrderBy(m => Path(m.transform), StringComparer.Ordinal).First();
+            Build(new Group { key = Path(anchor.transform), anchor = anchor, members = members });
         }
     }
 
@@ -1407,27 +1423,90 @@ static class Shops
         return false;
     }
 
-    static void Create(ShopItemSpawner s, List<ShopItemSpawner> group)
+    static void Build(Group g)
     {
-        Vector3 oak = Vector3.zero;
-        foreach (var g in group) oak += g.transform.position;
-        oak /= group.Count;
-
-        // --- counter under the oakum barrels ---
-        var counter = Below(oak + Vector3.up * 0.3f, 2f);
-        Vector3 center, axis;
-        float half, bottom;
-        if (counter) CounterBox(counter, out center, out axis, out half, out bottom);
-        else
+        try
         {
-            center = oak; axis = Flat(s.transform.right).normalized; half = 0.5f; bottom = oak.y - 0.9f;
-            if (axis.sqrMagnitude < 1e-6f) axis = Vector3.right;
+            if (Placements().TryGetValue(g.key, out var v))
+            {
+                if (v == "skip") { Plugin.Log.LogInfo($"Canvas shop '{g.key}': disabled"); return; }
+                if (Manual(g, v)) return;
+                Plugin.Log.LogWarning($"Canvas shop '{g.key}': bad placement '{v}', using automatic");
+            }
+            Auto(g);
         }
+        catch (Exception e) { Plugin.Log.LogError($"Canvas shop '{g.key}' failed: {e}"); }
+    }
+
+    // ---- hand-made placement from Balance.ShopPlacements ----
+
+    static bool Manual(Group g, string value)
+    {
+        var parts = value.Split('|');
+        if (parts.Length != 4) return false;
+        var f = new float[4];
+        for (int i = 0; i < 4; i++)
+            if (!float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out f[i])) return false;
+
+        var t = g.anchor.transform;
+        Vector3 floor = t.TransformPoint(new Vector3(f[0], f[1], f[2]));
+        Quaternion rot = Quaternion.Euler(0f, Yaw(t.forward) + f[3], 0f);
+        Bounds bale = Footprint(Tarp.Template, rot);
+
+        Vector3 pos = floor - Flat(bale.center);
+        pos.y = floor.y - bale.min.y + 0.01f;
+        Stack(g, pos, rot, bale.size.y + 0.01f);
+        Plugin.Log.LogInfo($"Canvas shop stack ({Balance.ShopStack}) '{g.key}': manual placement");
+        return true;
+    }
+
+    static Dictionary<string, string> Placements()
+    {
+        if (placements != null) return placements;
+        placements = new Dictionary<string, string>();
+        foreach (var e in Balance.ShopPlacements.Split(';'))
+        {
+            int i = e.LastIndexOf('=');
+            if (i <= 0) continue;
+            placements[e.Substring(0, i).Trim()] = e.Substring(i + 1).Trim();
+        }
+        return placements;
+    }
+
+    static string Path(Transform t)
+    {
+        string p = t.name;
+        for (var x = t.parent; x != null; x = x.parent) p = x.name + "/" + p;
+        return p;
+    }
+
+    static float Yaw(Vector3 dir) => Mathf.Atan2(dir.x, dir.z) * Mathf.Rad2Deg;
+
+    // ---- automatic placement ----
+
+    static void Auto(Group g)
+    {
+        var s = g.anchor;
+        Vector3 oak = Vector3.zero;
+        foreach (var m in g.members) oak += m.transform.position;
+        oak /= g.members.Count;
+
+        // counter under the oakum barrels (a huge collider = floor/terrain, not a counter)
+        var counter = Below(oak + Vector3.up * 0.3f, 2f);
+        Vector3 center = Vector3.zero, axis = Vector3.right;
+        float half = 0f, bottom = 0f;
+        bool onCounter = counter != null && counter.GetType().Name != "TerrainCollider";
+        if (onCounter)
+        {
+            CounterBox(counter, out center, out axis, out half, out bottom);
+            if (half > Balance.ShopMaxCounter) onCounter = false;
+        }
+        if (!onCounter) RowBox(s, g.members, out center, out axis, out half, out bottom);
 
         // the end of the counter closest to the oakum goes first
         float near = Vector3.Dot(Flat(oak - center), axis) >= 0f ? 1f : -1f;
         float fromY = oak.y + 0.3f;
-        bool anyArea = ShopAreas().Count > 0;
+        var areas = ShopAreas();
         var spawners = UnityEngine.Object.FindObjectsOfType<ShopItemSpawner>()
             .Where(x => x.itemPrefab != null && !ours.Contains(x.gameObject))
             .ToList();
@@ -1437,26 +1516,33 @@ static class Shops
         {
             foreach (var sp in Candidates(center, axis * side, half, bottom, fromY))
             {
-                if (anyArea && !InShop(sp.pos + Vector3.up * sp.bale.extents.y)) continue;
+                if (areas.Count > 0 && !InShop(sp.pos + Vector3.up * sp.bale.extents.y, areas)) continue;
                 if (fallback == null) fallback = sp;
                 if (!Blocked(sp, spawners)) { found = sp; break; }
             }
             if (found != null) break;
         }
 
-        var spot = found ?? fallback ?? Candidates(center, axis * near, half, bottom, fromY).First();
+        string where = onCounter
+            ? $"counter '{counter.name}' half {half:F2}"
+            : $"barrel row (under the barrels: '{(counter ? counter.name : "none")}') half {half:F2}";
 
-        for (int i = 0; i < Balance.ShopStack; i++)
-            Spawn(s, spot.pos + Vector3.up * (spot.height * i), spot.rot);
+        var spot = found ?? fallback;
+        if (spot == null)
+        {
+            Plugin.Log.LogWarning($"Canvas shop '{g.key}' skipped: no spot inside the shop area, {where}");
+            return;
+        }
 
-        string msg = $"Canvas shop stack ({Balance.ShopStack}) near '{s.name}' at {spot.pos}: " +
-                     $"counter '{(counter ? counter.name : "none")}' half {half:F2}, offset {spot.dist:F2}, " +
-                     $"ground {spot.ground:F3}, bale {spot.bale.size}, free spot {found != null}";
+        Stack(g, spot.pos, spot.rot, spot.height);
+
+        string msg = $"Canvas shop stack ({Balance.ShopStack}) '{g.key}' at {spot.pos}: {where}, " +
+                     $"offset {spot.dist:F2}, ground {spot.ground:F3}, free spot {found != null}";
         if (found != null) Plugin.Log.LogInfo(msg);
-        else Plugin.Log.LogWarning(msg + " - no free spot inside the shop area, may clip");
+        else Plugin.Log.LogWarning(msg + " - may clip");
     }
 
-    // positions past the counter end: first moving outwards, then (fallback) back towards the counter
+    // positions past the counter end: first moving outwards, then a little back towards the counter
     static IEnumerable<Spot> Candidates(Vector3 center, Vector3 dir, float half, float bottom, float fromY)
     {
         Quaternion rotA = Quaternion.LookRotation(dir, Vector3.up);
@@ -1471,7 +1557,7 @@ static class Shops
         float start = half + Balance.ShopGap + baleHalf;
         var dists = new List<float>();
         for (float d = start; d <= start + Balance.ShopMaxShift + 0.001f; d += 0.05f) dists.Add(d);
-        for (float d = start - 0.05f; d >= half * 0.5f; d -= 0.05f) dists.Add(d);
+        for (float d = start - 0.05f; d >= Mathf.Max(half * 0.5f, start - 1f); d -= 0.05f) dists.Add(d);
 
         foreach (var d in dists)
         {
@@ -1498,7 +1584,6 @@ static class Shops
             return true;
         }
 
-        // goods that are not spawned yet: spawner points near the stack
         const float margin = 0.25f;
         foreach (var s in spawners)
         {
@@ -1512,7 +1597,13 @@ static class Shops
         return false;
     }
 
-    static void Spawn(ShopItemSpawner s, Vector3 pos, Quaternion rot)
+    static void Stack(Group g, Vector3 pos, Quaternion rot, float h)
+    {
+        for (int i = 0; i < Balance.ShopStack; i++)
+            Spawn(g.anchor, pos + Vector3.up * (h * i), rot);
+    }
+
+    static GameObject Spawn(ShopItemSpawner s, Vector3 pos, Quaternion rot)
     {
         var go = new GameObject("HatchTarp shop spawner");
         go.SetActive(false);
@@ -1527,6 +1618,7 @@ static class Shops
 
         ours.Add(go);
         go.SetActive(true);
+        return go;
     }
 
     // ---- counter geometry ----
@@ -1544,6 +1636,20 @@ static class Shops
         return null;
     }
 
+    // ground under a point; falls back to the counter bottom
+    static float Ground(Vector3 at, float fromY, float fallback)
+    {
+        var from = new Vector3(at.x, fromY, at.z);
+        var hits = Physics.RaycastAll(from, Vector3.down, 4f, ~0, QueryTriggerInteraction.Ignore);
+        foreach (var h in hits.OrderBy(x => x.distance))
+        {
+            if (h.collider.GetComponentInParent<ShipItem>() != null) continue;
+            if (h.collider.GetComponentInParent<CharacterController>() != null) continue;
+            return Mathf.Abs(h.point.y - fallback) < 0.6f ? h.point.y : fallback;
+        }
+        return fallback;
+    }
+
     // center, long horizontal axis and half length of the counter
     static void CounterBox(Collider c, out Vector3 center, out Vector3 axis, out float half, out float bottom)
     {
@@ -1556,7 +1662,6 @@ static class Shops
         center = m.MultiplyPoint3x4(lb.center);
         bottom = c.bounds.min.y;
 
-        // three box axes in world space; the most vertical one is the height
         var ax = new[]
         {
             m.MultiplyVector(new Vector3(lb.extents.x, 0f, 0f)),
@@ -1578,16 +1683,30 @@ static class Shops
         axis = half > 1e-4f ? longest / half : Vector3.right;
     }
 
-    // ground under a point; falls back to the counter bottom
-    static float Ground(Vector3 at, float fromY, float fallback)
+    // no real counter (barrels on the floor): the row of oakum barrels plays the counter
+    static void RowBox(ShopItemSpawner s, List<ShopItemSpawner> group,
+                       out Vector3 center, out Vector3 axis, out float half, out float bottom)
     {
-        var c = Below(new Vector3(at.x, fromY, at.z), 4f);
-        if (!c) return fallback;
-        Physics.Raycast(new Vector3(at.x, fromY, at.z), Vector3.down, out var hit, 4f, ~0, QueryTriggerInteraction.Ignore);
-        float y = fallback;
-        foreach (var h in Physics.RaycastAll(new Vector3(at.x, fromY, at.z), Vector3.down, 4f, ~0, QueryTriggerInteraction.Ignore))
-            if (h.collider == c) { y = h.point.y; break; }
-        return Mathf.Abs(y - fallback) < 0.6f ? y : fallback;
+        var pts = group.Select(g => g.transform.position).ToList();
+        center = Vector3.zero;
+        foreach (var p in pts) center += p;
+        center /= pts.Count;
+
+        axis = Flat(s.transform.right);
+        float best = 0f;
+        foreach (var p in pts)
+            foreach (var q in pts)
+            {
+                float d = Vector3.Distance(Flat(p), Flat(q));
+                if (d > best) { best = d; axis = Flat(q - p); }
+            }
+        if (axis.sqrMagnitude < 1e-6f) axis = Vector3.right;
+        axis.Normalize();
+
+        Bounds barrel = Footprint(s.itemPrefab, s.transform.rotation);
+        half = best * 0.5f + Along(barrel, axis);
+        bottom = center.y + barrel.min.y;
+        center += Flat(barrel.center);
     }
 
     // ---- shop area (items outside it are not sold by the shopkeeper) ----
@@ -1601,10 +1720,11 @@ static class Shops
         return list;
     }
 
-    static bool InShop(Vector3 p)
+    static bool InShop(Vector3 p, List<Collider> areas)
     {
-        foreach (var c in ShopAreas())
+        foreach (var c in areas)
         {
+            if (!c) continue;
             if (c is MeshCollider mc && !mc.convex) { if (c.bounds.Contains(p)) return true; continue; }
             if ((c.ClosestPoint(p) - p).sqrMagnitude < 1e-6f) return true;
         }
