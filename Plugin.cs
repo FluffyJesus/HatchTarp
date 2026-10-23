@@ -36,15 +36,23 @@ static class Balance
 	public const float ShopMaxCounter = 3f;     // a "counter" longer than this (m, half length) is a floor or terrain, not a counter
 	// hand-placed canvas stacks: shop spawner path = x|y|z|yaw (relative to the oakum spawner), or "skip"
     public const string ShopPlacements =
-        "island 9 E (dragon cliffs) scenery/shop item spawner (229)=-1.101|-0.086|2.061|128.742;" +
-        "island 1 A (gold rock) scenery/shop item (218)=-0.977|-0.878|0.58|120.995;" +
-        "island scenery Lagoon Shipyard/shop item (244)=1.42|-0.001|0.958|-116.547";
+        "island 9 E (dragon cliffs) scenery/shop item spawner (229)=-1.153|0.004|0.935|130.443;" +
+        "island 1 A (gold rock) scenery/shop item (218)=-0.342|-0.891|0.096|116.015;" +
+        "island scenery Lagoon Shipyard/shop item (244)=0.458|-0.01|-0.358|87.133;" +
+        "island 15 M (Fort) scenery/shop item (278)=-0.247|-0.95|-1.851|59.069;" +
+        "island 21 M (siren song) scenery/shop item (99)=-0.988|0.001|-0.736|34.547;" +
+        "island 3 A (neverdin) scenery/shop spawner debug (22)=-0.534|-0.821|-1.316|-25.421;" +
+        "island 37 E/shop item (132)=0.37|-0.632|1.013|177.048;" +
+        "island 12 E (new port) scenery/shop item supplies (13)=3.27|-0.848|-0.461|-0.38;" +
+        "island 11 E (crab beach) scenery/shop spawner crab cakes (72)=-0.003|-0.593|0.853|45.184;" +
+        "island 2 A (alnilem) scenery/shop item (bottle) (34)=-0.238|-0.807|-1.034|-45.105;" +
+        "island 16 M (sunspire) scenery/shop item (62)=0.67|-0.95|1.153|-91.125";
 }
 
 // ============================================================================
 //  PLUGIN: config, debug tools
 // ============================================================================
-[BepInPlugin("yourname.hatchtarp", "HatchTarp", "0.4.1")]
+[BepInPlugin("yourname.hatchtarp", "HatchTarp", "1.0.0")]
 public class Plugin : BaseUnityPlugin
 {
     internal static Plugin Instance;
@@ -90,7 +98,7 @@ public class Plugin : BaseUnityPlugin
 
         Sun.OnNewDay += Hatches.DailyWear;
         new Harmony("yourname.hatchtarp").PatchAll();
-        Log.LogInfo("HatchTarp 0.4.1 loaded");
+        Log.LogInfo("HatchTarp 0.4.2 loaded");
     }
 
     void Update()
@@ -419,20 +427,14 @@ static class ItemModel
         if (sp) Traverse.Create(sp).Field("prefabIndex").SetValue(idx);
         else Plugin.Log.LogError("The model has no SaveablePrefab!");
 
-        // 6) darken, keeping the texture
-        var tint = new Color(0.55f, 0.47f, 0.36f, 1f);
-        foreach (var r in go.GetComponentsInChildren<Renderer>(true))
+        // 6) own model: a tied stack of folded oiled canvas (the wool bale's material lends the shader)
+        var srcRenderer = go.GetComponentInChildren<Renderer>(true);
+        HatchTarpModel.CanvasBaleModel.Apply(go, srcRenderer ? srcRenderer.sharedMaterial : null);
+        foreach (var r in go.GetComponentsInChildren<MeshRenderer>(true))
         {
-            var mats = r.sharedMaterials;
-            for (int i = 0; i < mats.Length; i++)
-            {
-                if (!mats[i]) continue;
-                var m = new Material(mats[i]);
-                if (m.HasProperty("_Color")) m.color = m.color * tint;
-                if (m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.35f);
-                mats[i] = m;
-            }
-            r.sharedMaterials = mats;
+            if (r.gameObject != go) continue; // the cloth, not the rope
+            foreach (var m in r.sharedMaterials)
+                if (m && m.HasProperty("_Glossiness")) m.SetFloat("_Glossiness", 0.35f); // oiled
         }
 
         Plugin.Log.LogInfo($"Canvas template: model '{src.name}', handling '{oakum.name}', price {tarp.value}, oakum barrel = {Tarp.OakumFull}");
